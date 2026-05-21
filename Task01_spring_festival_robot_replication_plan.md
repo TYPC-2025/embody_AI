@@ -1,4 +1,4 @@
-# 春晚舞蹈机器人复刻学习与实现路线
+﻿# 春晚舞蹈机器人复刻学习与实现路线
 
 整理时间：2026-05-21
 
@@ -525,6 +525,7 @@ python -m uvicorn web.app:app --host 0.0.0.0 --port 8000
 http://localhost:8000
 ```
 
+
 意义：
 
 ```text
@@ -763,6 +764,7 @@ MuJoCo 提供更接近物理仿真的展示方式，也可以导出 mp4 结果�
 - 为什么多机器人相机会偏？
 - 如何调整相机角度？
 - 如何限制视频时长？
+
 
 ## 6. 最小可行复刻路线
 
@@ -1299,3 +1301,969 @@ python -m uvicorn web.app:app --host 0.0.0.0 --port 8000
 ```text
 http://localhost:8000
 ```
+
+## 13. WSL 实操版：按顺序具体怎么做
+
+这一节按你当前情况写：
+
+```text
+你已经在 WSL 中有 conda，并且已有一个 habitat 环境。
+```
+
+但要注意：
+
+```text
+不要直接把春晚机器人复刻相关依赖全部装进 habitat 环境。
+```
+
+原因：
+
+1. `habitat` 环境现在已经承担 Habitat-Sim / Habitat-Lab。
+2. PromptHMR 和 GMR 依赖很多，尤其是 PyTorch、CUDA、编译扩展、人体模型、可视化依赖。
+3. 如果全部装进 `habitat`，很容易把已经跑通的 Habitat 环境破坏。
+4. 更稳的做法是保留 `habitat`，另外创建 `gmr` 和 `phmr`。
+
+所以推荐环境关系是：
+
+```text
+habitat：保留给 Habitat-Sim / Habitat-Lab
+gmr：用于人体动作 -> 机器人动作
+phmr：用于视频 -> 人体动作
+```
+
+### 第 1 步：进入 WSL 并设置代理
+
+PowerShell：
+
+```powershell
+wsl -d Ubuntu
+```
+
+进入 Ubuntu 后：
+
+```bash
+source ~/miniconda3/etc/profile.d/conda.sh
+```
+
+如果访问 GitHub / HuggingFace / PyPI 不稳定，设置代理：
+
+```bash
+export HTTP_PROXY=http://127.0.0.1:7897
+export HTTPS_PROXY=http://127.0.0.1:7897
+export ALL_PROXY=http://127.0.0.1:7897
+export http_proxy=$HTTP_PROXY
+export https_proxy=$HTTPS_PROXY
+export all_proxy=$ALL_PROXY
+```
+
+意义：
+
+```text
+你之前已经遇到过 GitHub TLS 握手失败。先设置代理，可以减少 git clone、pip install、模型下载失败。
+```
+
+检查：
+
+```bash
+git --version
+conda --version
+python --version
+nvidia-smi
+```
+
+如果 `nvidia-smi` 能看到 RTX 4060，说明 WSL 可以识别 GPU。
+
+### 第 2 步：创建专门的项目目录
+
+建议不要放在 `/mnt/d/...` 下运行重依赖代码，而是放在 WSL 原生目录：
+
+```bash
+mkdir -p ~/embodied_ai/locomotion
+cd ~/embodied_ai/locomotion
+```
+
+意义：
+
+```text
+WSL 原生 Linux 路径对软链接、编译、文件权限、大量小文件更稳定。Windows 盘挂载路径 /mnt/d 适合存文档，不适合放复杂深度学习工程。
+```
+
+### 第 3 步：克隆 Every-Embodied 主仓库
+
+```bash
+git clone https://github.com/datawhalechina/every-embodied.git
+cd every-embodied/07-机器人操作、运动控制/Locomotion/video2robot
+```
+
+如果 GitHub 报 TLS 错误，使用：
+
+```bash
+git -c http.proxy=http://127.0.0.1:7897 \
+    -c https.proxy=http://127.0.0.1:7897 \
+    clone https://github.com/datawhalechina/every-embodied.git
+```
+
+意义：
+
+```text
+主仓库提供课程组织好的脚本、patch、环境文件和 Web UI。先拿主仓库，后面才知道要调用哪些第三方代码。
+```
+
+检查当前位置：
+
+```bash
+pwd
+ls
+```
+
+你应该在类似路径：
+
+```text
+/home/tyros/embodied_ai/locomotion/every-embodied/07-机器人操作、运动控制/Locomotion/video2robot
+```
+
+### 第 4 步：查看项目结构
+
+```bash
+find . -maxdepth 2 -type d | sort
+ls scripts
+ls envs
+ls patches
+```
+
+意义：
+
+```text
+先看目录结构，知道脚本、环境文件、patch、第三方依赖分别在哪里。不要在不知道目录含义时直接运行命令。
+```
+
+重点目录：
+
+```text
+scripts：主流程脚本
+envs：conda 环境文件
+patches：课程适配补丁
+third_party：第三方项目
+data：输入视频、中间结果、机器人动作输出
+web：Web UI
+```
+
+### 第 5 步：克隆第三方依赖
+
+```bash
+mkdir -p third_party
+cd third_party
+git clone --depth 1 https://github.com/taeyoun811/GMR.git GMR
+git clone --depth 1 https://github.com/taeyoun811/PromptHMR.git PromptHMR
+cd ..
+```
+
+如果失败，用代理版：
+
+```bash
+git -c http.proxy=http://127.0.0.1:7897 \
+    -c https.proxy=http://127.0.0.1:7897 \
+    clone --depth 1 https://github.com/taeyoun811/GMR.git GMR
+
+git -c http.proxy=http://127.0.0.1:7897 \
+    -c https.proxy=http://127.0.0.1:7897 \
+    clone --depth 1 https://github.com/taeyoun811/PromptHMR.git PromptHMR
+```
+
+意义：
+
+```text
+PromptHMR 负责从视频恢复人体动作；GMR 负责把人体动作重定向到机器人。主项目只是把二者串成一条流水线。
+```
+
+检查：
+
+```bash
+ls third_party
+```
+
+期望：
+
+```text
+GMR
+PromptHMR
+```
+
+### 第 6 步：应用 patch
+
+先检查 patch 是否能应用：
+
+```bash
+git apply --check patches/main.patch
+git -C third_party/PromptHMR apply --check ../../patches/prompthmr.patch
+git -C third_party/GMR apply --check ../../patches/gmr.patch
+```
+
+如果检查通过，再真正应用：
+
+```bash
+git apply patches/main.patch
+git -C third_party/PromptHMR apply ../../patches/prompthmr.patch
+git -C third_party/GMR apply ../../patches/gmr.patch
+```
+
+意义：
+
+```text
+patch 是课程为了让 PromptHMR、GMR 和 video2robot 当前流程协同工作做的适配。先 --check 可以避免应用到一半失败。
+```
+
+检查 patch 改了什么：
+
+```bash
+git apply --stat patches/main.patch
+git -C third_party/PromptHMR diff --stat
+git -C third_party/GMR diff --stat
+```
+
+### 第 7 步：先创建 gmr 环境
+
+建议先做 `gmr`，不要先做 `phmr`。
+
+原因：
+
+```text
+gmr 负责机器人动作重定向和可视化，依赖相对少。先跑输出端，更容易建立信心；PromptHMR 环境更复杂，后面再做。
+```
+
+创建：
+
+```bash
+conda env create -f envs/gmr.yml
+```
+
+如果环境已存在：
+
+```bash
+conda env update -n gmr -f envs/gmr.yml --prune
+```
+
+激活：
+
+```bash
+conda activate gmr
+```
+
+检查：
+
+```bash
+python --version
+pip list | grep -E "smplx|mujoco|viser|mink"
+```
+
+意义：
+
+```text
+gmr 环境用于运行 convert_to_robot.py、visualize.py 和 GMR 相关脚本。
+```
+
+### 第 8 步：验证 GMR 基础可导入
+
+在 `video2robot` 根目录下：
+
+```bash
+conda activate gmr
+python - <<'PY'
+import sys
+print("python", sys.version)
+try:
+    import smplx
+    print("smplx ok")
+except Exception as e:
+    print("smplx failed:", e)
+
+try:
+    import mujoco
+    print("mujoco ok")
+except Exception as e:
+    print("mujoco failed:", e)
+PY
+```
+
+意义：
+
+```text
+先验证核心包是否可导入。不要等到完整流程跑失败时才发现基础包没装好。
+```
+
+### 第 9 步：准备一个最小测试动作
+
+初学阶段不要直接处理长视频。建议先找课程示例输出或一个很短的动作项目：
+
+```text
+data/video_001/
+```
+
+如果没有现成的 `robot_motion.pkl`，这一阶段先只完成环境验证，不强行跑可视化。
+
+意义：
+
+```text
+复刻链路很长，要分段验证。GMR 可视化验证需要机器人动作文件，机器人动作文件来自 convert_to_robot.py，而 convert_to_robot.py 又依赖 PromptHMR 的人体动作输出。
+```
+
+你可以采用两条路线：
+
+```text
+路线 1：先找已有 robot_motion.pkl，直接验证 GMR 可视化。
+路线 2：先搭 PromptHMR，自己从视频生成 robot_motion.pkl。
+```
+
+### 第 10 步：创建 phmr 环境
+
+在 `video2robot` 根目录：
+
+```bash
+conda env create -f envs/phmr.yml
+```
+
+如果环境已存在：
+
+```bash
+conda env update -n phmr -f envs/phmr.yml --prune
+```
+
+激活：
+
+```bash
+conda activate phmr
+```
+
+意义：
+
+```text
+phmr 环境用于从视频恢复人体动作。它依赖更复杂，放在独立环境中可以避免污染 gmr 和 habitat。
+```
+
+检查：
+
+```bash
+python --version
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+```
+
+如果 `torch.cuda.is_available()` 是 `False`：
+
+```text
+不一定代表完全不能跑，但 PromptHMR 会很慢，部分 CUDA 扩展可能不可用。后续要根据报错处理。
+```
+
+### 第 11 步：安装 PromptHMR 依赖
+
+```bash
+conda activate phmr
+cd third_party/PromptHMR
+pip install -r requirements.txt
+```
+
+根据文档和实际报错，可能还要安装：
+
+```bash
+pip install chumpy
+pip install "git+https://github.com/facebookresearch/detectron2.git"
+pip install xformers
+pip install torch-scatter
+```
+
+注意：
+
+```text
+这些依赖可能和 CUDA / PyTorch 版本强相关。如果安装失败，不要盲目换所有版本，先保存完整报错。
+```
+
+意义：
+
+```text
+PromptHMR 不是普通 Python 包，它包含人体检测、分割、视频姿态恢复、相机估计等多个模块。
+```
+
+### 第 12 步：准备 SMPL-X 和模型权重
+
+推荐优先用课程给出的模型仓库：
+
+```bash
+git-lfs install
+git lfs clone https://huggingface.co/Datawhale/spring-festival-wushu-robot-replication-model
+```
+
+如果使用 PromptHMR 自带脚本：
+
+```bash
+cd third_party/PromptHMR
+bash scripts/fetch_smplx.sh
+bash scripts/fetch_data.sh
+```
+
+意义：
+
+```text
+代码只是算法流程，真正的模型参数、人体模型文件、检测权重都需要额外下载。没有权重，视频姿态恢复无法运行。
+```
+
+检查：
+
+```bash
+find . -iname "*smpl*" | head
+find . -iname "*.pth" -o -iname "*.pt" -o -iname "*.ckpt" | head
+```
+
+### 第 13 步：准备输入视频
+
+建议先准备一个 5 到 10 秒短视频，满足：
+
+```text
+单人
+全身
+固定镜头
+背景简单
+动作不太快
+人物不要出画
+```
+
+放到项目目录：
+
+```bash
+mkdir -p data/video_001
+```
+
+再把视频放入：
+
+```text
+data/video_001/input.mp4
+```
+
+意义：
+
+```text
+先用短视频验证全链路，成功后再换成长视频或复杂舞蹈。
+```
+
+### 第 14 步：从视频提取人体姿态
+
+```bash
+conda activate phmr
+cd /path/to/video2robot
+python scripts/extract_pose.py --project data/video_001
+```
+
+意义：
+
+```text
+这一步把 input.mp4 中的人体动作恢复成 SMPL-X 或相关中间表示。后面的 GMR 不直接读视频，而是读这一步的结果。
+```
+
+检查：
+
+```bash
+find data/video_001 -maxdepth 3 -type f | sort
+```
+
+你要关注：
+
+```text
+是否生成了人体姿态结果
+是否生成了可视化结果
+是否有报错日志
+```
+
+### 第 15 步：人体动作转机器人动作
+
+```bash
+conda activate gmr
+cd /path/to/video2robot
+python scripts/convert_to_robot.py --project data/video_001
+```
+
+多人轨迹：
+
+```bash
+python scripts/convert_to_robot.py --project data/video_001 --all-tracks
+```
+
+意义：
+
+```text
+这一步把人体动作映射到机器人模型，输出 robot_motion.pkl。
+```
+
+检查：
+
+```bash
+ls -lh data/video_001/*robot_motion*.pkl
+```
+
+期望：
+
+```text
+robot_motion.pkl
+```
+
+或者多人轨迹：
+
+```text
+robot_motion_track_1.pkl
+robot_motion_track_2.pkl
+...
+```
+
+### 第 16 步：robot-viser 可视化
+
+```bash
+conda activate gmr
+cd /path/to/video2robot
+export VISER_FIXED_PORT=8789
+python scripts/visualize.py --project data/video_001 --robot-viser
+```
+
+浏览器访问输出地址，通常类似：
+
+```text
+http://localhost:8789
+```
+
+意义：
+
+```text
+快速看机器人动作是否像人类动作，优先检查动作方向、节奏、左右手脚是否对应。
+```
+
+### 第 17 步：MuJoCo 导出视频
+
+```bash
+conda activate gmr
+cd third_party/GMR
+python scripts/vis_robot_motion.py \
+  --robot unitree_g1 \
+  --robot_motion_path /path/to/video2robot/data/video_001/robot_motion.pkl \
+  --record_video \
+  --video_path /path/to/video2robot/data/video_001/mujoco_robot.mp4
+```
+
+意义：
+
+```text
+MuJoCo 视频可以作为最终展示材料，比浏览器临时可视化更适合提交作业。
+```
+
+检查：
+
+```bash
+ls -lh /path/to/video2robot/data/video_001/mujoco_robot.mp4
+```
+
+### 第 18 步：启动 Web UI
+
+Web UI 更适合你已经把环境跑通之后再用。
+
+```bash
+conda activate phmr
+cd /path/to/video2robot
+python -m pip install -U fastapi "uvicorn[standard]" jinja2 python-multipart
+pkill -f "video2robot/visualization/robot_viser.py" || true
+export VISER_FIXED_PORT=8789
+python -m uvicorn web.app:app --host 0.0.0.0 --port 8000
+```
+
+Windows 浏览器访问：
+
+```text
+http://localhost:8000
+```
+
+意义：
+
+```text
+Web UI 把生成视频、上传视频、姿态提取、机器人转换、可视化封装到页面里，适合演示和重复操作。
+```
+
+### 第 19 步：最终整理结果
+
+建议输出目录结构：
+
+```text
+data/video_001/
+  input.mp4
+  pose result files
+  robot_motion.pkl
+  mujoco_robot.mp4
+  notes.md
+```
+
+建议作业记录：
+
+```text
+1. 输入视频来源
+2. Prompt 或视频说明
+3. PromptHMR 提取结果
+4. GMR 转换结果
+5. robot-viser / MuJoCo 截图
+6. 遇到的问题
+7. 后续改进方向
+```
+
+## 14. 扩展问题答案速查
+
+### 关于输入视频
+
+**什么样的视频最适合动作复刻？**
+
+单人、全身、固定镜头、背景简单、无遮挡、动作速度适中的视频最适合。因为姿态恢复模型需要连续看到完整人体。
+
+**视频需要多少 FPS？**
+
+通常 24 到 30 FPS 足够。FPS 太低会丢动作细节，FPS 太高会增加处理时间和数据量。
+
+**视频分辨率越高越好吗？**
+
+不是。清晰即可。过高分辨率会增加计算量，且不一定提升姿态恢复质量。一般 720p 或 1080p 更合适。
+
+**人物必须全身出现吗？**
+
+最好必须。脚、手、头、躯干缺失会导致 SMPL-X 拟合不准，后续机器人动作会抖动或错误。
+
+**如果人物出画怎么办？**
+
+先裁剪视频，只保留人物完整出现的片段。出画严重时不要强行复刻，因为中间姿态会断。
+
+**如果视频里有多人怎么办？**
+
+先做单人。多人需要跟踪每个人的 track，后续还要选择主角或使用 `--all-tracks`，复杂度更高。
+
+**如果镜头在运动怎么办？**
+
+镜头运动会增加相机估计难度，导致人体运动和相机运动混在一起。初学阶段尽量用固定镜头。
+
+**如果背景复杂怎么办？**
+
+背景复杂会影响人体检测和分割。可以换视频、裁剪画面、提高人物占比，或者选择背景更干净的片段。
+
+**如果人物穿宽松衣服怎么办？**
+
+宽松衣服会遮挡身体轮廓，姿态估计可能不准。紧身或轮廓清晰的衣服更适合。
+
+**如果动作太快怎么办？**
+
+可以选更慢片段，或先降低目标难度。快速踢腿、旋转、腾空动作最容易出现姿态跳变。
+
+### 关于 Prompt
+
+**如何写一个适合机器人复刻的 prompt？**
+
+写清楚“单人、全身、固定镜头、背景简单、动作连贯、动作不要太快”。例如：“一个完整站立的人物在空旷舞台中央表演中国武术动作，镜头固定，全身入镜，动作连贯。”
+
+**Prompt 里为什么要写全身入镜？**
+
+因为姿态恢复需要看到全身关节。缺脚会影响步态，缺手会影响上肢动作。
+
+**Prompt 里为什么要写镜头固定？**
+
+固定镜头能减少相机运动干扰，让模型更容易判断人体真实运动。
+
+**Prompt 里为什么要避免快速剪辑？**
+
+快速剪辑会破坏动作连续性，PromptHMR 难以稳定跟踪同一个人。
+
+**如何让生成视频更像武术？**
+
+在 prompt 中加入“抱拳、弓步、转身、出拳、踢腿、收势”等具体动作词，而不是只写“跳舞”。
+
+**如何让动作更适合机器人？**
+
+避免大幅腾空、快速旋转、劈叉、极限下腰。选择重心变化小、双脚交替稳定支撑的动作。
+
+**如何避免动作过于夸张？**
+
+加入“动作稳健、节奏中等、幅度适中、无夸张变形”等限制。
+
+**如何控制动作节奏？**
+
+描述“慢速、分解动作、每个动作停顿半秒、节奏清晰”。生成视频仍不完全可控，需要多试几次。
+
+### 关于 PromptHMR
+
+**PromptHMR 输入是什么？**
+
+输入通常是视频或视频帧序列，以及相关 prompt / 配置。它的目标是从视频中恢复人体三维姿态。
+
+**PromptHMR 输出是什么？**
+
+输出是人体三维动作的中间表示，通常包含 SMPL-X 参数、人体位姿、轨迹或可视化结果。
+
+**它和普通 2D 姿态估计有什么区别？**
+
+2D 姿态估计只给图像平面上的关键点；PromptHMR 要恢复三维人体姿态，更适合后续映射到机器人。
+
+**它为什么要恢复 3D 人体？**
+
+机器人运动发生在三维空间。只有 2D 点无法可靠表示身体朝向、深度、转身、步态等信息。
+
+**它如何处理多人？**
+
+通常需要检测和跟踪不同人物，给每个人分配 track。多人场景比单人更容易错跟、漏跟或交换身份。
+
+**它失败时通常表现为什么？**
+
+人体骨架跳变、左右手脚反、身体扭曲、某些帧丢失、人物轨迹突然漂移。
+
+**如何查看 PromptHMR 中间结果？**
+
+查看 `data/video_xxx` 下生成的可视化视频、姿态文件、日志和中间输出目录。
+
+### 关于 SMPL-X
+
+**SMPL-X 是什么？**
+
+SMPL-X 是参数化人体模型，用少量参数表示人体形状、姿态、手部和面部等信息。
+
+**SMPL-X 和 SMPL 有什么区别？**
+
+SMPL 主要表示身体；SMPL-X 扩展了手部和面部表达，人体表达能力更强。
+
+**SMPL-X 为什么适合作为中间表示？**
+
+它是统一标准人体模型，可以把不同视频中的人体动作转成同一种可计算格式。
+
+**SMPL-X 的 pose 参数是什么？**
+
+pose 参数描述各个关节的旋转，也就是人体当前姿态。
+
+**shape 参数是什么？**
+
+shape 参数描述人体体型差异，例如高矮胖瘦。
+
+**translation 是什么？**
+
+translation 是人体整体在三维空间中的平移位置。
+
+**global orientation 是什么？**
+
+global orientation 是人体整体朝向，例如面向前方、左转或右转。
+
+**SMPL-X 是否包含手部动作？**
+
+包含手部参数，但具体能否稳定恢复取决于输入视频清晰度和模型能力。
+
+### 关于 GMR
+
+**GMR 的输入是什么？**
+
+输入是人体动作表示，通常来自 SMPL-X 或相关中间文件。
+
+**GMR 的输出是什么？**
+
+输出是机器人动作文件，例如 `robot_motion.pkl`，用于可视化或仿真。
+
+**什么是 retargeting？**
+
+Retargeting 是把一个身体结构上的动作迁移到另一个身体结构上。例如从人迁移到机器人。
+
+**人体动作如何映射到机器人关节？**
+
+需要建立人体关节和机器人关节之间的对应关系，再通过优化或运动学约束求机器人关节角。
+
+**机器人关节自由度少于人体怎么办？**
+
+只能近似。保留关键动作语义，舍弃机器人无法表达的细节。
+
+**机器人腿长和人腿长不同怎么办？**
+
+需要尺度归一化和姿态重映射，不能直接复制人类关节位置。
+
+**机器人不能做某些动作怎么办？**
+
+需要限制关节角、降低动作幅度、平滑动作，或换成机器人可执行的近似动作。
+
+**映射时如何考虑关节限制？**
+
+在优化中加入关节上下限，防止输出超过机器人机械结构允许范围。
+
+**映射时如何保持平衡？**
+
+视觉复刻阶段不一定保证平衡。物理可行阶段需要考虑重心、足底接触、支撑面和闭环控制。
+
+### 关于机器人动作文件
+
+**`robot_motion.pkl` 是什么？**
+
+它是 Python pickle 文件，保存机器人动作数据，通常包含每一帧的机器人关节状态、根位姿或相关轨迹。
+
+**里面保存的是关节角还是位姿？**
+
+通常会包含关节角，也可能包含根节点位置、朝向、帧率等元数据，具体要用脚本读取确认。
+
+**每一帧对应什么？**
+
+每一帧对应一个时间点的机器人状态。
+
+**帧率是多少？**
+
+取决于输入视频和处理脚本。需要从文件元数据或生成脚本参数中确认。
+
+**如何读取 pkl 文件？**
+
+可以用 Python：
+
+```python
+import pickle
+with open("robot_motion.pkl", "rb") as f:
+    data = pickle.load(f)
+print(type(data))
+print(data.keys() if hasattr(data, "keys") else None)
+```
+
+**如何修改动作？**
+
+先读取 pkl，找到关节角数组，再做裁剪、平滑、缩放或替换。修改前必须备份原文件。
+
+**如何裁剪动作片段？**
+
+按帧索引截取数组，例如保留第 100 到 300 帧。具体字段名要先检查 pkl 结构。
+
+**如何拼接两个动作？**
+
+把两个动作数组按时间维拼接，并在连接处做平滑过渡，避免突然跳变。
+
+**如何平滑动作？**
+
+可以对关节角序列做滑动平均、低通滤波或样条平滑。
+
+### 关于可视化
+
+**robot-viser 是什么？**
+
+robot-viser 是 Web 3D 可视化工具，用来在浏览器中查看机器人动作。
+
+**MuJoCo 是什么？**
+
+MuJoCo 是物理仿真引擎，可以模拟机器人、关节、碰撞和地面接触。
+
+**两者区别是什么？**
+
+robot-viser 更轻量，适合快速看动作；MuJoCo 更接近物理仿真，适合录制和检查物理表现。
+
+**可视化里动作对了，为什么真实机器人还可能失败？**
+
+因为可视化可能没有完整考虑电机力矩、控制延迟、地面摩擦、足底接触和稳定性。
+
+**如何调整机器人颜色？**
+
+通常要修改可视化脚本或机器人模型材质配置。
+
+**如何调整相机角度？**
+
+MuJoCo 脚本通常有 `--camera_azimuth` 等参数；robot-viser 可在浏览器中拖动视角。
+
+**如何导出视频？**
+
+MuJoCo 脚本使用 `--record_video --video_path output.mp4`。
+
+**如何比较人体视频和机器人视频？**
+
+把人体原视频和机器人导出视频并排播放，比较节奏、手脚方向、关键姿态和整体轨迹。
+
+### 关于物理约束
+
+**什么是开环动作？**
+
+开环动作是不根据实时反馈修正的动作播放。给定动作序列后直接执行。
+
+**什么是闭环控制？**
+
+闭环控制会根据传感器反馈不断修正动作，例如根据 IMU 调整姿态。
+
+**为什么开环动作容易摔？**
+
+因为真实环境有扰动、摩擦变化和模型误差，固定动作无法自动纠正偏差。
+
+**什么是足底接触？**
+
+足底接触指机器人脚与地面的接触状态，包括是否接触、接触点和接触力。
+
+**什么是地面摩擦？**
+
+地面摩擦决定脚是否会打滑。摩擦不足时，动作看起来对也可能滑倒。
+
+**什么是重心？**
+
+重心是身体质量的合成位置。双足机器人需要让重心和支撑区域关系合理。
+
+**什么是 ZMP？**
+
+ZMP 是零力矩点，用于分析双足机器人动态稳定性。
+
+**什么是动力学可行性？**
+
+动力学可行表示动作不仅几何上能摆出来，还能在力、扭矩、接触和稳定性上真实执行。
+
+**为什么人类动作不能直接复制给机器人？**
+
+因为人体和机器人结构、质量分布、关节自由度、驱动能力、平衡方式都不同。
+
+### 关于真实机器人
+
+**真实机器人需要什么接口？**
+
+需要底层控制接口，例如关节位置控制、速度控制、力矩控制或厂商 SDK。
+
+**如何把 `robot_motion.pkl` 发送给机器人？**
+
+需要把 pkl 中的关节轨迹转换成机器人控制器可接受的命令格式，并按固定频率发送。
+
+**需要控制频率是多少？**
+
+取决于机器人平台，常见可能是 50Hz、100Hz、200Hz 或更高。
+
+**如何做安全保护？**
+
+限制关节角、速度、力矩；设置急停；先低速小幅测试；远离人和障碍物。
+
+**如何避免摔倒？**
+
+需要稳定控制器、IMU 反馈、足底接触判断、动作平滑和物理可行性检查。
+
+**需要 IMU 反馈吗？**
+
+真实双足机器人通常需要 IMU 反馈来判断身体姿态并修正平衡。
+
+**需要足底力传感器吗？**
+
+如果要精确控制步态和接触，足底力传感器很有帮助，但是否有取决于硬件。
+
+**需要强化学习控制器吗？**
+
+不一定。简单动作可以用传统控制；复杂动态动作通常需要学习型控制器或优化控制。
+
+### 关于 IsaacSim / Isaac Lab
+
+**为什么文档提到 IsaacSim？**
+
+IsaacSim 是更完整的机器人仿真平台，适合高保真视觉、物理和大规模训练。
+
+**IsaacSim 和 MuJoCo 有什么区别？**
+
+MuJoCo 轻量、动力学仿真强；IsaacSim 更重，图形和机器人生态更完整。
+
+**IsaacSim 更适合做什么？**
+
+适合复杂场景、视觉传感器、合成数据、GPU 并行仿真和机器人学习。
+
+**动作映射和强化学习训练是什么关系？**
+
+动作映射给出参考动作；强化学习可以训练控制器，让机器人更稳定地跟踪这些动作。
+
+**如何用 IsaacSim 提升动作稳定性？**
+
+可以在 IsaacSim 中训练 tracking policy，让机器人在扰动下仍能跟随参考动作。
+
+**什么是 Sim2Real？**
+
+Sim2Real 是从仿真迁移到真实机器人。目标是在仿真训练的策略能在真实世界工作。
+
+**为什么仿真成功不代表真实成功？**
+
+真实世界有模型误差、传感器噪声、控制延迟、摩擦差异和硬件限制。
