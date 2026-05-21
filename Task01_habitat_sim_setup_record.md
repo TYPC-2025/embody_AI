@@ -10,7 +10,7 @@
 本文档分成两部分：
 
 1. Habitat-Sim：已经完成基础搭建和无图像传感器示例验证。
-2. Habitat-Lab：下一步计划在当前 `habitat` 环境中继续安装和验证 PointNav 任务。
+2. Habitat-Lab：已经完成基础安装、PointNav 测试数据下载和最小 PointNav 环境验证。完整记录见 `Task01_habitat_lab_setup_record.md`。
 
 ## 环境信息
 
@@ -24,7 +24,8 @@
 - Python 版本：`3.9.19`
 - Habitat-Sim 版本：`0.2.5`
 - Habitat-Sim 源码版本：`v0.2.5`, commit `c8887c8`
-- Habitat-Lab 计划版本：`v0.2.5`
+- Habitat-Lab 版本：`v0.2.5`, commit `17ec6b3c1`
+- Habitat-Baselines 版本：`0.2.5`
 - GPU：WSL 中可识别 NVIDIA GeForce RTX 4060 Laptop GPU
 
 ## Habitat-Sim 已完成内容
