@@ -459,13 +459,55 @@ pip install -r requirements.txt
 
 你可以问：
 
-- PromptHMR 为什么需要 SAM2？
-- `droidcalib` 是做什么的？
-- `lietorch` 为什么要编译？
-- `detectron2` 用在哪里？
-- 为什么 PyTorch 版本会影响编译？
-- `torch-scatter` 和 `xformers` 是不是必须？
-- 如果我只上传已经处理好的姿态文件，还需要 phmr 吗？
+1. PromptHMR 为什么需要 SAM2？
+- SAM2负责给PromptHMR提供高质量的人体掩码（mask），是“空间提示”的核心来源
+PromptHMR本质是**prompt-based人体重建**，支持三类输入提示：框（bbox），掩码（mask），文本/交互提示（可选）
+- **SAM2（Segment Anything 2）的作用：** \
+自动分割人体：输入视频 / 图像 → SAM2 输出每一帧的人体掩码（精确到轮廓）。\
+视频跟踪：SAM2 能在连续帧之间跟踪同一个人，输出时序一致的 mask 序列，解决遮挡、形变、运动模糊下的分割漂移。\
+掩码作为 Prompt：PromptHMR 的 mask encoder 会把 SAM2 输出的掩码编码成特征，和图像特征一起送入 SMPL-X 解码器，显著提升姿态 / 形状精度（尤其多人、拥挤、遮挡场景）。
+- **没有 SAM2 的后果：**\
+只能用手动框 / 点提示，批量视频处理几乎不可用；\
+自动检测 + 分割质量差，多人互相干扰严重；\
+重建精度明显下降。
+2. `droidcalib` 是做什么的？
+- `droidcalib`是相机内参自动标定模块，让PromptHMR能处理任意手机/普通相机拍的视频（未知内参）
+- 在PromptHMR的**world-coordinate多人视频流程**里：要把2D图像重建出3D世界坐标人体，必须知道**相机内参（焦距、主点、畸变）**；普通手机视频内参未知，且不同手机/镜头差异很大；droidcalib基于DROID-SLAM，**从单目视频自动优化出相机内参 + 相机轨迹 + 稀疏3D点**。无需标定板。
+- **作用链条**：`视频→droidcalib标定内参→相机感知（camera-aware）特征→PromptHMR重建全局3D人体`
+- 不用droidcalib：必须手动输入相机内参；只能用已知内参的相机（如标定好的单反）；手机视频无法跑world-coordinate流程。
+3. `lietorch` 为什么要编译？
+- 一句话：lietorch 是 Lie 代数（旋转 / 位姿）的 CUDA 加速库，纯 Python 写不了这么快，必须编译成 C++/CUDA 二进制。
+- 关键原因：\
+功能定位：lietorch 专门做 SO (3)/SE (3) 李代数运算（旋转矩阵、四元数、位姿优化），在 SLAM、相机位姿、人体全局旋转优化中大量使用。\
+性能要求极高：
+每帧要做几十次矩阵求逆、乘法、梯度计算；
+Python + NumPy 太慢，必须 CUDA 核函数加速（快几十倍）。\
+依赖 PyTorch C++ 扩展：
+lietorch 是 PyTorch 的 C++/CUDA 扩展，不是纯 Python 库；
+需要用 setup.py 或 CMake 编译成 .so/.dll，才能被 Python 导入。\
+版本强绑定：
+编译时必须和你当前的 PyTorch + CUDA 版本完全匹配；
+版本不匹配就会报 undefined symbol、CUDA error。
+- PromptHMR 里哪里用：
+DROID-SLAM 相机位姿优化；\
+全局 SMPL-X 旋转 / 平移优化；\
+多人相对位姿调整。
+4. `detectron2` 用在哪里？ 
+- 一句话：detectron2 负责 “人体检测”，给 SAM2 提供初始框，是整个 pipeline 的起点。
+- PromptHMR 视频 pipeline 顺序：
+detectron2：
+运行 Mask R-CNN，检测每一帧中的人体，输出 bounding box + 粗糙 mask；
+只筛出 “人” 这一类，过滤背景 / 其他物体。\
+SAM2：
+以 detectron2 输出的 bbox 为提示，精细化分割 + 跟踪，输出高质量时序 mask。\
+PromptHMR：
+用 SAM2 的 mask + 图像特征，重建 SMPL-X 人体网格。\
+detectron2 是可替换但默认必需：\
+你可以手动提供 bbox，跳过 detectron2；\
+但自动流程（跑任意视频）必须依赖 detectron2 做初始检测。
+5. 为什么 PyTorch 版本会影响编译？
+6. `torch-scatter` 和 `xformers` 是不是必须？ 
+7. 如果我只上传已经处理好的姿态文件，还需要 phmr 吗？
 
 ### 第 6 步：准备模型权重
 
@@ -498,13 +540,42 @@ PromptHMR 和 SMPL-X 需要预训练权重和人体模型文件，代码本身�
 
 你可以问：
 
-- 模型权重和代码有什么区别？
-- 为什么 clone 了仓库还不能直接跑？
-- HuggingFace 下载失败怎么办？
-- 权重应该放在哪里？
-- 权重路径是写死的吗？
-- SMPL-X 模型是否需要授权？
-- 如果权重版本不匹配，会出现什么现象？
+1. 模型权重和代码有什么区别？ 
+- 代码：程序逻辑、运算规则、网络结构、调用流程、配置参数，纯文本文件，决定模型怎么算
+- 权重：模型训练习得的参数数值，存储网络神经元连接权重，决定模型算出什么结果
+- 类比：代码是菜谱，权重是做菜积累的经验火候；有菜谱无经验做不出成品，有经验无菜谱无法运行
+2. 为什么 clone 了仓库还不能直接跑？ 
+- 缺少依赖库，环境版本不匹配
+- 缺失模型权重、数据集、预训练文件
+- 本地硬件、CUDA、驱动不符合要求
+- 路径、配置文件未按需修改
+- 部分模块需要本地编译扩展
+- 未配置环境变量、密钥、账号权限
+3. HuggingFace 下载失败怎么办？ 
+- 切换国内镜像源，替换下载地址
+- 使用git lfs命令行拉取大文件权重
+- 手动网页下载压缩包，本地解压放入对应目录
+- 更换网络节点、关闭代理重连
+- 降低下载并发数，分段重试
+- 改用 hf-transfer 加速工具
+4. 权重应该放在哪里？ 
+- 项目预设目录：仓库内checkpoints、weights、models文件夹
+- HuggingFace 默认缓存目录：系统用户下.cache/huggingface/hub
+- 自定义目录：自己新建文件夹统一存放，后续配置指向该路径
+5. 权重路径是写死的吗？ 
+- 默认代码里大多写死固定路径，直接读取预设文件夹；
+- 支持手动修改配置文件、命令行参数，自定义权重存放路径。
+6. SMPL-X 模型是否需要授权？ 
+需要官方授权
+- 个人学术研究：免费申请授权后才可下载使用
+- 商用产品、SaaS 商业化开发：必须签订商业授权协议
+- 无授权私自商用、分发模型属于违规侵权
+7. 如果权重版本不匹配，会出现什么现象？
+- 直接报错加载失败、参数维度不匹配
+- 运行闪退、CUDA 异常、内存报错
+- 推理结果错乱、画面畸形、姿态崩坏
+- 精度暴跌、无效果、完全输出异常内容
+- 算子不兼容，中途程序卡死终止
 
 ### 第 7 步：启动 Web UI
 
@@ -547,6 +618,248 @@ robot-viser 如果随机开端口，Web iframe 可能连接失败。固定端口
 - `0.0.0.0` 和 `127.0.0.1` 有什么区别？
 - `localhost:8000` 打不开时怎么排查？
 - iframe 为什么会拒绝连接？
+
+#### 第 7 步常见问题答案（Web UI 必看）
+
+下面这些解释，建议你至少完整读一遍。因为 Web UI 看似“点按钮”，背后其实还是在跑命令行脚本；理解了调用链路，你排错会快很多。
+
+##### 1) Web UI 背后调用了哪些脚本？
+
+先给你一句话结论：
+
+```text
+Web UI = 浏览器前端（HTML/JS） + FastAPI 后端接口 + 后台子进程（跑 scripts/*.py 和 robot_viser.py）
+```
+
+以课程仓库的 `video2robot` 为例（目录一般是 `.../Locomotion/video2robot/`），关键入口文件分三层：
+
+1) **前端页面（你看到的 UI）**
+
+- `web/templates/index.html`：网页骨架，包含按钮、表单、iframe 等。
+- `web/static/js/main.js`：真正的“按钮逻辑”。比如点“开始执行流程”，它会 `fetch("/api/...")` 去调用后端。
+
+2) **后端接口（FastAPI 路由）**
+
+- `web/app.py`：FastAPI 应用入口（把各个 router 挂载上去）。
+- `web/routers/pipeline.py`：生成视频 / 提取姿态 / 转机器人等 API。
+- `web/routers/files.py`：上传 `original.mp4`、下载结果文件等 API。
+- `web/routers/projects.py`：项目列表/创建/删除（本质上就是管理 `data/` 目录）。
+- `web/routers/viser.py`：启动/关闭 3D 可视化服务（给 iframe 用）。
+
+3) **真正“干活”的脚本（被 Web UI 在后台启动）**
+
+Web UI 并不会在进程里直接做深度学习推理，而是用“后台子进程”去跑现成脚本。典型调用链路是：
+
+- **文生视频（生成 `original.mp4`）**
+
+  ```text
+  浏览器 -> POST /api/pipeline/generate-video
+        -> web/routers/pipeline.py
+        -> web/tasks.py: TaskManager.run_generate_video()
+        -> conda run -n phmr python scripts/generate_video.py ...
+  ```
+
+  其中 `scripts/generate_video.py` 会根据 `--model` 选择 Seedance / Veo / Sora，并把视频保存到 `data/<project>/original.mp4`。
+
+- **从视频提取人体姿态（生成 `results.pkl` / `smplx.npz` 等）**
+
+  ```text
+  浏览器 -> POST /api/pipeline/extract-pose
+        -> web/tasks.py: TaskManager.run_extract_pose()
+        -> conda run -n phmr python scripts/extract_pose.py --project data/<project> [--static-camera]
+  ```
+
+  `scripts/extract_pose.py` 里面还会再用 `subprocess` 去调用 PromptHMR 的 `scripts/run_pipeline.py`，把视频变成人体 SMPL-X 相关结果。
+
+- **把人体动作重定向到机器人（生成 `robot_motion*.pkl`）**
+
+  ```text
+  浏览器 -> POST /api/pipeline/retarget
+        -> web/tasks.py: TaskManager.run_retarget()
+        -> conda run -n gmr python scripts/convert_to_robot.py --project data/<project> --robot unitree_g1 --all-tracks
+  ```
+
+  这里关键脚本是 `scripts/convert_to_robot.py`，它会调用 GMR/retarget 的逻辑，输出 `robot_motion.pkl` 或 `robot_motion_track_*.pkl`。
+
+- **3D 可视化（给 iframe 提供一个“单独的可视化网页”）**
+
+  ```text
+  浏览器 -> POST /api/viser/start
+        -> web/viser_manager.py: ViserManager.start()
+        -> conda run -n phmr python video2robot/visualization/robot_viser.py --project data/<project> --host 0.0.0.0 --port 8789 ...
+  ```
+
+  注意：`robot_viser.py` 是一个**独立的 Web 服务**（通常端口是 8789），Web UI 会把它的 URL 填进 iframe，嵌在页面里显示。
+
+如果你想“自己验证 Web UI 到底跑了什么脚本”，最直接的方法是：
+
+- 打开 `web/tasks.py` 和 `web/viser_manager.py`，看里面 `conda run ... python ...` 的 `cmd` 数组是怎么拼出来的。
+
+##### 2) `uvicorn` 是什么？
+
+`uvicorn` 可以把它理解成：
+
+```text
+“启动一个 Python Web 服务器，把浏览器的 HTTP 请求转发给你的 FastAPI 应用处理”
+```
+
+更具体一点：
+
+- `FastAPI` 这类现代框架用的是 **ASGI** 规范（异步 Web 规范）。
+- `uvicorn` 是一个 **ASGI Server**：负责监听端口（比如 8000），接收请求，然后把请求交给 `FastAPI` 的 `app` 对象处理。
+
+你看到的启动命令：
+
+```bash
+python -m uvicorn web.app:app --host 0.0.0.0 --port 8000
+```
+
+含义是：
+
+- `web.app:app`：导入 Python 模块 `web/app.py` 里的变量 `app`（也就是 `FastAPI(...)` 创建的对象）。
+- `--host/--port`：告诉服务器监听哪个地址/端口。
+
+##### 3) `FastAPI` 是什么？
+
+`FastAPI` 是一个用 Python 写 Web API 的框架。你可以把它当成：
+
+```text
+“帮你写后端接口的工具：定义路由、解析参数、返回 JSON、支持异步、自动生成 API 文档”
+```
+
+在本项目里，它的角色很清晰：
+
+- 把“生成视频 / 提取姿态 / 转机器人 / 启动可视化”等动作，封装成 HTTP 接口；
+- 前端网页用 `fetch("/api/...")` 去调用这些接口；
+- 后端接口再去启动后台任务（跑脚本）并返回任务状态。
+
+##### 4) 为什么要先 `pkill` 旧的 robot-viser？
+
+原因不是“必须 pkill 才能跑”，而是为了**减少最常见的两类坑**：
+
+1) **端口占用（最常见）**
+
+- `robot_viser.py` 会监听一个端口（教程里通常固定 `8789`）。
+- 如果你上次启动的 `robot_viser.py` 没有正确退出，它会一直占着端口。
+- 这时你再启动新的 `robot_viser.py`，就会出现“端口已被占用 / 启动失败”，Web UI 的 iframe 自然连不上。
+
+2) **“你以为你连的是新服务，其实浏览器连的是旧服务”**
+
+- 就算端口没冲突（例如上次随机端口、这次固定端口），残留进程也容易导致“到底哪个在跑”搞不清。
+- 先 `pkill` 清掉残留，可视化会更可控。
+
+一句话总结：`pkill` 是一种“把现场清干净再开始”的做法，属于工程上的稳妥处理。
+
+##### 5) `0.0.0.0` 和 `127.0.0.1` 有什么区别？
+
+这俩经常把人绕晕，你记住两句话就够用了：
+
+1) **`127.0.0.1`（localhost）= 只允许本机访问**
+
+- 这是“回环地址”（loopback）。
+- 服务如果只绑定 `127.0.0.1`，那么只有这台机器自己能访问（同一台机器的浏览器/程序）。
+
+2) **`0.0.0.0` = 服务器监听“所有网卡/所有 IP”**
+
+- 这是“监听地址”的写法，意思是：Wi-Fi、网线、回环地址……都接收。
+- 它常用于你希望“别的设备也能访问我这台机器的服务”的场景（比如同局域网手机访问）。
+
+重要提醒（和你这次遇到的问题直接相关）：
+
+```text
+0.0.0.0 只是“监听用”，不是“访问用”。
+浏览器访问请用 http://127.0.0.1:8000 或 http://localhost:8000，或者用你机器的真实 IP。
+```
+
+所以 `uvicorn` 打印 `http://0.0.0.0:8000` 时，你不要去“点这个链接”，要手动改成 `localhost`/`127.0.0.1`。
+
+##### 6) `localhost:8000` 打不开时怎么排查？
+
+把排查分成 4 层，从最容易的开始做（每层都有“现象 -> 结论”）：
+
+**第 0 层：先确认你访问的 URL 正确**
+
+- 不要访问 `http://0.0.0.0:8000`（这个地址经常会“无法访问”）。
+- 先试：`http://127.0.0.1:8000/health`（如果能返回 `{"status":"ok"}` 说明服务是真的起来了）。
+
+**第 1 层：确认服务真的在监听端口**
+
+在你运行 `uvicorn` 的同一个环境里（比如 WSL 的 Ubuntu 终端）执行：
+
+```bash
+curl -v http://127.0.0.1:8000/health
+```
+
+- 如果 `curl` 都连不上：说明 uvicorn 其实没在跑 / 崩了 / 或者没监听到你以为的端口。
+- 如果 `curl` 能连上但浏览器不行：通常是浏览器代理、DNS、WSL/Windows 转发、或防火墙问题，继续往下看。
+
+**第 2 层：确认你启动的是“正确的 web.app”**
+
+如果你不在 `video2robot` 根目录启动，Python 可能导入到“另一个叫 web 的包”，导致你以为跑的是 Web UI，其实跑的是别的东西。
+
+在启动前先做一次确认（在同一 conda 环境里）：
+
+```bash
+python -c "import web; print(web.__file__)"
+```
+
+你希望看到的路径类似：
+
+```text
+.../Locomotion/video2robot/web/__init__.py
+```
+
+如果不是这个路径，就先 `cd` 到真正的 `video2robot` 根目录再启动（不要用 `/path/to/...` 这种占位路径）。
+
+**第 3 层：如果你在 WSL 里跑服务，但在 Windows 浏览器里访问**
+
+一般 `http://localhost:8000` 就能通；如果不通：
+
+1. 在 WSL 里拿到 WSL 的 IP：
+
+   ```bash
+   hostname -I
+   ```
+
+2. 用 Windows 浏览器访问：`http://<WSL-IP>:8000`
+
+如果这样能通，说明是“localhost 转发/代理”层面的问题；如果仍不通，通常是端口监听/防火墙/进程没起来。
+
+##### 7) iframe 为什么会拒绝连接？
+
+Web UI 的 iframe 连接的不是 8000 端口的 FastAPI，而是 **robot-viser 的端口**（通常是 `8789`，也可能是你配置的 `VISER_FIXED_PORT`）。
+
+所以 iframe “拒绝连接”最常见原因按概率排序是：
+
+1) **robot-viser 根本没启动成功（端口上没人监听）**
+
+- 典型现象：浏览器控制台/页面提示 `localhost refused to connect` / `ERR_CONNECTION_REFUSED`。
+- 根因可能是：依赖没装（`viser/cv2/trimesh` 等）、模型/数据缺失、脚本运行报错、进程启动就退出。
+
+2) **端口被旧进程占用，导致新进程起不来**
+
+- 这就是为什么教程建议先 `pkill -f "video2robot/visualization/robot_viser.py"`。
+
+3) **端口“随机变化”导致 iframe 指向了错误端口**
+
+- 如果 robot-viser 每次随机端口，而页面仍在用旧端口，iframe 就会连不上。
+- 固定 `VISER_FIXED_PORT=8789` 的意义，就是让 iframe 永远连固定端口，减少“端口漂移”的问题。
+
+4) **你用的不是 localhost 打开 Web UI（比如远程机器 / 局域网 IP），iframe 仍然指向了 127.0.0.1**
+
+- `127.0.0.1` 永远表示“当前这台机器自己”，如果你是从别的电脑访问，就一定连不上。
+- 解决思路：用“访问 Web UI 的同一个主机名/IP”去访问 robot-viser。课程 Web UI 的前端代码里也做了类似替换逻辑（会把 `0.0.0.0` 替换成当前页面的 hostname）。
+- 如果你部署在远程机器上，更稳妥的做法是显式设置 `VISER_PUBLIC_HOST=<你的远程服务器 IP 或域名>`，让后端返回的 iframe URL 直接是可访问的公网/局域网地址。
+
+5) **（少见）iframe 被安全策略阻止**
+
+这种情况下浏览器控制台通常会出现类似：
+
+```text
+Refused to display ... in a frame because it set 'X-Frame-Options' ...
+```
+
+这不是“连不上”，而是“连上了但不允许被嵌入 iframe”。对本项目来说更常见的还是前四种原因。
 
 ### 第 8 步：文本生成视频
 
